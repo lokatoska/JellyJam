@@ -1,0 +1,86 @@
+name: Build Jelly Jam unsigned IPA
+
+on:
+  workflow_dispatch:
+
+jobs:
+  compile-ios:
+    runs-on: macos-26
+    timeout-minutes: 90
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout files and download Git LFS
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Verify Unity iOS export and Git LFS
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -d 'IOSExport/Unity-iPhone.xcodeproj' ]; then
+            EXPORT_DIR='IOSExport'
+          elif [ -d 'iOSExport/Unity-iPhone.xcodeproj' ]; then
+            EXPORT_DIR='iOSExport'
+          else
+            echo 'ERROR: Unity-iPhone.xcodeproj not found under IOSExport or iOSExport.'
+            echo 'Root files:'
+            ls -la
+            exit 1
+          fi
+          echo "IOS_EXPORT_DIR=$EXPORT_DIR" >> "$GITHUB_ENV"
+          echo "Found Unity export in $EXPORT_DIR"
+          git lfs ls-files
+          RUNTIME="$EXPORT_DIR/Frameworks/UnityRuntime.framework/UnityRuntime"
+          if [ -f "$RUNTIME" ]; then
+            FILESIZE=$(stat -f%z "$RUNTIME")
+            echo "UnityRuntime size: $FILESIZE bytes"
+            if [ "$FILESIZE" -lt 100000000 ]; then
+              echo 'ERROR: UnityRuntime is unexpectedly small. Git LFS content was not retrieved.'
+              exit 1
+            fi
+          else
+            echo 'ERROR: UnityRuntime binary not found.'
+            exit 1
+          fi
+          xcodebuild -version
+
+      - name: Compile Unity iOS app without signing
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project "$IOS_EXPORT_DIR/Unity-iPhone.xcodeproj" \
+            -scheme Unity-iPhone \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/JellyJam.xcarchive" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            'CODE_SIGN_IDENTITY=' \
+            archive
+
+      - name: Package unsigned IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH="$(find "$RUNNER_TEMP/JellyJam.xcarchive/Products/Applications" -maxdepth 1 -type d -name '*.app' -print -quit)"
+          if [ -z "$APP_PATH" ]; then
+            echo 'ERROR: Xcode did not produce an .app under the archive.'
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/unsigned-package/Payload"
+          ditto "$APP_PATH" "$RUNNER_TEMP/unsigned-package/Payload/$(basename "$APP_PATH")"
+          cd "$RUNNER_TEMP/unsigned-package"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/JellyJam-unsigned.ipa"
+          ls -lh "$GITHUB_WORKSPACE/JellyJam-unsigned.ipa"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: JellyJam-unsigned-IPA
+          path: JellyJam-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 7
