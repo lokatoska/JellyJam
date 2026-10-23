@@ -47,10 +47,38 @@ jobs:
           fi
           xcodebuild -version
 
+      - name: Skip Unity symbol-processing phases for unsigned playtest
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYTHON'
+          from pathlib import Path
+          import re, os
+          project = Path(os.environ['IOS_EXPORT_DIR']) / 'Unity-iPhone.xcodeproj' / 'project.pbxproj'
+          original = project.read_text()
+          phase_blocks = re.compile(r'(?ms)^\s*[A-F0-9]{24} /\*.*?\*/ = \{\n\s*isa = PBXShellScriptBuildPhase;.*?^\s*\};')
+          changed = [0]
+          def fix(block_match):
+              block = block_match.group(0)
+              if not re.search(r'name = "?Unity Process symbols', block):
+                  return block
+              updated, n = re.subn(r'(?m)^(\s*shellScript = ).*?;\s*$', r'\1"echo Skipping Unity symbol processing for unsigned test build";', block, count=1)
+              if n != 1:
+                  raise SystemExit('ERROR: Found Unity symbol phase but could not replace its script safely')
+              changed[0] += 1
+              return updated
+          output = phase_blocks.sub(fix, original)
+          if changed[0] == 0:
+              raise SystemExit('ERROR: No Unity Process symbols build phase found; project layout differs')
+          project.write_text(output)
+          print(f'Disabled {changed[0]} Unity symbol-processing build phase(s) in temporary GitHub checkout.')
+          PYTHON
+
       - name: Compile Unity iOS app without signing
         shell: bash
         run: |
           set -euo pipefail
+          set +e
           xcodebuild \
             -project "$IOS_EXPORT_DIR/Unity-iPhone.xcodeproj" \
             -scheme Unity-iPhone \
@@ -60,7 +88,15 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             'CODE_SIGN_IDENTITY=' \
-            archive
+            archive 2>&1 | tee "$RUNNER_TEMP/jellyjam-xcode.log"
+          STATUS=${PIPESTATUS[0]}
+          set -e
+          if [ "$STATUS" -ne 0 ]; then
+            echo '::group::Xcode errors and nearby diagnostics'
+            grep -n -i -E -C 5 'error:|fatal error|PhaseScriptExecution|command .*failed|ARCHIVE FAILED|permission denied|no such file or directory' "$RUNNER_TEMP/jellyjam-xcode.log" | tail -n 220 || true
+            echo '::endgroup::'
+            exit "$STATUS"
+          fi
 
       - name: Package unsigned IPA
         shell: bash
