@@ -1,1 +1,2 @@
+*.a filter=lfs diff=lfs merge=lfs -text
 IOSExport/Frameworks/UnityRuntime.framework/UnityRuntime filter=lfs diff=lfs merge=lfs -text
